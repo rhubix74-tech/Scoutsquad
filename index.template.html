@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Scout Squad</title>
+<style>
+:root{color-scheme:dark;--bg:#03040c;--panel:#10142a;--line:#232a4d;--fg:#d7def5;--dim:#7d89b5;--acc:#3ee0ff;--bad:#ff6b6b}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 system-ui,sans-serif;overflow:hidden}
+#app{display:flex;height:100%}#stage{position:relative;flex:1;min-width:0;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+#stage canvas{position:absolute;inset:0;width:100%;height:100%;outline:none;touch-action:none}
+#gui,#bb{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.g{font-family:"Montserrat","Segoe UI",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.g.ab:hover{filter:brightness(1.18)}.g.ab.pr{filter:brightness(.8)}
+#dbg{position:absolute;right:8px;top:8px;z-index:99999;width:34px;height:34px;padding:0;border-radius:17px;font-size:16px;opacity:.55}#dbg:hover{opacity:1}
+aside{display:none;width:330px;max-width:45vw;overflow:auto;background:var(--panel);border-left:1px solid var(--line);padding:10px}
+body.debug aside{display:block}
+h3{margin:12px 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}h3:first-child{margin-top:0}
+.row{display:flex;gap:6px;flex-wrap:wrap}
+button{font:inherit;color:var(--fg);background:#1a2144;border:1px solid var(--line);border-radius:6px;padding:5px 9px;cursor:pointer}
+button:hover{border-color:var(--acc)}button.on{background:#0e3b4a;border-color:var(--acc)}
+.stat{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;color:var(--dim)}.stat b{color:var(--fg);font-weight:500;text-align:right}
+#errs{font-family:ui-monospace,monospace;font-size:11px;color:var(--bad);white-space:pre-wrap;max-height:240px;overflow:auto}
+.dim{color:var(--dim)}kbd{background:#1a2144;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+#boot{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(5,6,15,.9);font-size:15px;z-index:99998}
+</style></head>
+<body><div id="app">
+<div id="stage"><canvas id="gl" tabindex="0"></canvas><canvas id="c2d" style="display:none"></canvas><div id="bb"></div><div id="gui"></div><button id="dbg" title="Debug panel (F2)">⚙</button><div id="boot">Booting…</div></div>
+<aside>
+  <h3>Status</h3>
+  <div class="stat"><span>renderer</span><b id="s-rend">-</b><span>fps (render)</span><b id="s-fps">-</b><span>sim ms / frame</span><b id="s-sim">-</b><span>game time</span><b id="s-time">-</b><span>threads</span><b id="s-thr">-</b><span>parts (drawn/total)</span><b id="s-parts">-</b><span>particles</span><b id="s-pt">-</b><span>gui elements</span><b id="s-gui">-</b><span>errors</span><b id="s-err">0</b></div>
+  <div class="row" style="margin-top:8px"><button id="b-pause">Pause</button><button id="b-speed">Speed 1×</button><button id="b-unlock">Unlock all: off</button></div>
+  <h3>Menu (visible GUI buttons)</h3><div class="row" id="menu"><span class="dim">none</span></div>
+  <h3>Errors</h3><div id="errs" class="dim">none</div>
+  <h3>Controls</h3>
+  <div class="dim"><kbd>W A S D</kbd>/<kbd>arrows</kbd> steer · <kbd>Space</kbd>/click fire · mouse aims · <kbd>Enter</kbd>/click advances dialogue · <kbd>F2</kbd> this panel<br>URL options: <code>?unlock=1</code> all levels · <code>?renderer=2d</code> wireframe fallback · <code>?debug=1</code> panel open</div>
+</aside></div>
+
+<script>/*@RUNTIME@*/</script>
+<script>/*@ROBLOX@*/</script>
+<script>/*@HOST@*/</script>
+<script>/*@VIEW2D@*/</script>
+<script>/*@GL3D@*/</script>
+<script>/*@GUI@*/</script>
+<script>/*@AUDIO@*/</script>
+<script>
+const SERVER_SRC = /*@SERVER_SRC@*/;
+const CLIENT_SRC = /*@CLIENT_SRC@*/;
+(function () {
+  const $ = id => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  // Unlock-all: enabled by holding T + C + S together within 5 s of boot (or ?unlock=1). The combo is remembered for this tab session.
+  const UNLOCK_KEY = 'starblox.unlockAll';
+  const ssGet = () => { try { return sessionStorage.getItem(UNLOCK_KEY) === '1'; } catch (_) { return false; } };
+  const ssSet = on => { try { if (on) sessionStorage.setItem(UNLOCK_KEY, '1'); else sessionStorage.removeItem(UNLOCK_KEY); } catch (_) {} };
+  const unlock = qs.get('unlock') === '1' || ssGet();
+  const stage = $('stage'), glc = $('gl'), c2c = $('c2d');
+  const errs = []; let host;
+  try {
+    host = LuauHost.createHost({ R: globalThis.LuauRuntime, createRoblox: globalThis.createRoblox, serverSrc: SERVER_SRC, clientSrc: CLIENT_SRC, userId: 1001, name: 'Player', unlockAll: unlock, party: qs.get('party') === '1' ? true : qs.get('party') === '0' ? false : undefined });
+  } catch (e) { $('boot').textContent = 'Boot failed: ' + (e && e.stack || e); throw e; }
+  const world = host.world;
+  world.onError = (msg, where) => { errs.push('[' + where + ' @' + world.time.toFixed(1) + 's] ' + msg); if (errs.length > 40) errs.shift(); console.error(where, msg); };
+
+  // renderer selection
+  let r3d = null, ctx2d = null, rendName = '2D wireframe';
+  if (qs.get('renderer') !== '2d') { try { r3d = LuauGL3D.createRenderer(glc, world); if (r3d) rendName = 'WebGL'; } catch (e) { errs.push('[webgl] ' + e.message); r3d = null; } }
+  let cv = glc; if (!r3d) { glc.style.display = 'none'; c2c.style.display = 'block'; ctx2d = c2c.getContext('2d'); cv = c2c; }
+
+  // GUI layer (created after host booted so PlayerGui exists)
+  const gui = LuauGui.createGuiLayer({ world, screenEl: $('gui'), billboardEl: $('bb'), playerGui: host.playerGui });
+  $('boot').remove();
+  const bootAt = performance.now();
+  const audio = LuauAudio.create(world);
+  window.__audio = audio;
+
+  // T + C + S held together within 5 s of boot -> turn Unlock All on (reloads once so every level/menu picks it up)
+  const unlockBtn = document.createElement('button');
+  unlockBtn.id = 'unlockall'; unlockBtn.textContent = 'Unlock all: ON (click to turn off)';
+  unlockBtn.style.cssText = 'position:absolute;left:8px;bottom:8px;z-index:99999;font:600 12px system-ui,sans-serif;color:#03121a;background:#3ee0ff;border:0;border-radius:14px;padding:6px 12px;opacity:.85;cursor:pointer;display:' + (unlock ? 'block' : 'none');
+  unlockBtn.onclick = () => { ssSet(false); qs.delete('unlock'); location.search = qs.toString(); };
+  $('stage').appendChild(unlockBtn);
+  if (!unlock) {
+    const held = new Set(), COMBO = ['KeyT', 'KeyC', 'KeyS'];
+    const onDown = e => {
+      if (performance.now() - bootAt > 5000) { window.removeEventListener('keydown', onDown); window.removeEventListener('keyup', onUp); return; }
+      held.add(e.code);
+      if (COMBO.every(k => held.has(k))) { window.removeEventListener('keydown', onDown); window.removeEventListener('keyup', onUp); ssSet(true); location.reload(); }
+    };
+    const onUp = e => held.delete(e.code);
+    window.addEventListener('keydown', onDown); window.addEventListener('keyup', onUp);
+    window.addEventListener('blur', () => held.clear());
+  }
+  $('b-unlock').textContent = 'Unlock all: ' + (unlock ? 'on' : 'off'); $('b-unlock').classList.toggle('on', unlock);
+  $('b-unlock').onclick = () => { ssSet(false); qs.set('unlock', unlock ? '0' : '1'); location.search = qs.toString(); };
+  const setDebug = on => { document.body.classList.toggle('debug', on); resize(); };
+  $('dbg').onclick = () => setDebug(!document.body.classList.contains('debug'));
+  if (qs.get('debug') === '1') document.body.classList.add('debug');
+
+  // system cursor follows UserInputService.MouseIconEnabled
+  const uis = world.getSvc('UserInputService');
+  const syncCursor = () => { const on = uis.props.MouseIconEnabled !== false; stage.style.cursor = on ? 'default' : 'none'; };
+  world.on('propChanged', (o, k) => { if (o === uis && k === 'MouseIconEnabled') syncCursor(); }); syncCursor();
+
+  // sizing
+  let W = 0, H = 0, dpr = 1;
+  function resize() { const r = stage.getBoundingClientRect(); dpr = Math.min(window.devicePixelRatio || 1, 2); const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+    if (w === W && h === H) return; W = w; H = h; if (!r3d) { c2c.width = W * dpr; c2c.height = H * dpr; ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0); } host.resize(W, H); gui.markAll(); }
+  new ResizeObserver(resize).observe(stage); resize();
+
+  // input (canvas only — GUI buttons handle their own pointer events and mark input as processed)
+  const GAME_KEYS = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Backquote']);
+  window.addEventListener('keydown', e => { if (e.repeat || /INPUT|TEXTAREA/.test(e.target.tagName)) return; if (GAME_KEYS.has(e.code)) e.preventDefault(); host.key(e.code, true); });
+  window.addEventListener('keyup', e => { if (/INPUT|TEXTAREA/.test(e.target.tagName)) return; if (e.code === 'F2') { e.preventDefault(); setDebug(!document.body.classList.contains('debug')); } host.key(e.code, false); });
+  window.addEventListener('blur', () => { for (const k of Array.from(world.keysDown)) world.sendKey(k.name, false); });
+  const pos = e => { const r = stage.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, id: e.pointerId, button: e.button, touch: e.pointerType === 'touch' }; };
+  stage.addEventListener('pointermove', e => host.pointer('move', pos(e)));
+  for (const c of [glc, c2c]) {
+    c.addEventListener('pointerdown', e => { c.focus(); try { c.setPointerCapture(e.pointerId); } catch (_) {} host.pointer('down', pos(e)); });
+    c.addEventListener('pointerup', e => host.pointer('up', pos(e)));
+    c.addEventListener('pointercancel', e => host.pointer('up', pos(e)));
+    c.addEventListener('contextmenu', e => e.preventDefault());
+  }
+  glc.focus();
+
+  // debug controls
+  $('b-pause').onclick = () => { host.paused = !host.paused; $('b-pause').textContent = host.paused ? 'Resume' : 'Pause'; $('b-pause').classList.toggle('on', host.paused); };
+  const speeds = [1, 2, 4, 0.5]; let si = 0;
+  $('b-speed').onclick = () => { si = (si + 1) % speeds.length; host.speed = speeds[si]; $('b-speed').textContent = 'Speed ' + speeds[si] + '×'; };
+  let lastMenu = '';
+  function refresh(fps, st) {
+    $('s-rend').textContent = rendName; $('s-fps').textContent = fps.toFixed(0); $('s-sim').textContent = host.simMs.toFixed(1); $('s-time').textContent = world.time.toFixed(1) + 's';
+    $('s-thr').textContent = world.threads.length; $('s-parts').textContent = st.drawn + ' / ' + st.parts; $('s-pt').textContent = st.particles; $('s-gui').textContent = gui.count(); $('s-err').textContent = world.errors.length;
+    const bs = host.buttons(), key = bs.map(b => b.label).join('|');
+    if (key !== lastMenu) { lastMenu = key; const m = $('menu'); m.textContent = ''; if (!bs.length) m.innerHTML = '<span class="dim">none</span>';
+      bs.forEach(b => { const el = document.createElement('button'); el.textContent = (b.label || '(unnamed)').replace(/\s+/g, ' ').slice(0, 40); el.onclick = () => { host.click(b); glc.focus(); }; m.appendChild(el); }); }
+    $('errs').textContent = errs.length ? errs.join('\n') : 'none'; $('errs').className = errs.length ? '' : 'dim';
+  }
+
+  // main loop
+  let last = performance.now(), frames = 0, fpsT = last, fps = 0, uiT = 0, st = { drawn: 0, parts: 0, particles: 0 };
+  function frame(now) {
+    const dt = (now - last) / 1000; last = now;
+    host.tick(dt); audio.update(now);
+    try { gui.flush(); gui.updateBillboards(); } catch (e) { if (!frame.gw) { frame.gw = 1; errs.push('[gui] ' + (e.stack || e)); } }
+    try { if (r3d) st = r3d.render(W, H, dpr); else { const n = LuauView2D.draw(ctx2d, world, W, H); st = { drawn: n, parts: n, particles: 0 }; } }
+    catch (e) { if (!frame.rw) { frame.rw = 1; errs.push('[render] ' + (e.stack || e)); } }
+    frames++; if (now - fpsT >= 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; }
+    if (now - uiT >= 250) { uiT = now; if (document.body.classList.contains('debug')) refresh(fps, st); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  window.__host = host; window.__gui = gui; window.__r3d = r3d;
+})();
+</script></body></html>
